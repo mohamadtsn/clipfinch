@@ -1,0 +1,9 @@
+[package]
+name = "clipfinch-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+x11rb = { version = "0.13", features = ["xtest"] }

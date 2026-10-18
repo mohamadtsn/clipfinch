@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Clipfinch
+GenericName=Clipboard History
+Comment=Clipboard history with search, pinboards and a paste queue
+Exec=clipfinch --show
+Icon=clipfinch
+Terminal=false
+Categories=Utility;GTK;
+Keywords=clipboard;history;paste;copy;
+StartupNotify=false

@@ -1,0 +1,39 @@
+[package]
+name = "clipfinch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clipboard history for Linux (GTK4)"
+
+[[bin]]
+name = "clipfinch"
+path = "src/main.rs"
+
+[features]
+default = ["tray"]
+# System tray icon (StatusNotifierItem). Build with --no-default-features to drop it.
+tray = ["dep:ksni"]
+
+[dependencies]
+clipfinch-core = { path = "../core" }
+clipfinch-linux = { path = "../linux" }
+anyhow = "1"
+async-channel = "2"
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+gdk4-x11 = "0.9"
+ksni = { version = "0.2", optional = true }
+
+[package.metadata.deb]
+name = "clipfinch"
+maintainer = "Clipfinch contributors <noreply@example.com>"
+copyright = "2026, Clipfinch contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = "Clipboard history with search, pinboards and a paste queue for GNOME/GTK desktops."
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/clipfinch", "usr/bin/", "755"],
+    ["../../assets/clipfinch.desktop", "usr/share/applications/", "644"],
+    ["../../assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/clipfinch.svg", "644"],
+]
