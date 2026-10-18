@@ -3,6 +3,10 @@
 Clipboard history for Linux (GTK4, Rust). Written for Ubuntu/GNOME, inspired by
 the macOS app Copywren. All code is original.
 
+![Clipfinch popup](docs/pic1.png)
+
+> **Status:** early alpha. Tested on Ubuntu 26.04 (Wayland session).
+
 ## Features
 
 - Records text, links, images, files and colors, with **every clipboard format** kept
@@ -112,3 +116,14 @@ scripts/       deps-ubuntu.sh, install.sh, uninstall.sh
   intercepting Ctrl+V, which Wayland does not allow.
 - No "hide from screen sharing" option (no equivalent on Linux).
 - The popup does not follow the text cursor (see the Wayland table).
+
+## About this project
+
+Clipfinch was written with the help of [Claude](https://claude.ai) (Anthropic).
+It is inspired by [Copywren](https://github.com/sonatina-dream/copywren), a clipboard
+manager for macOS, because I wanted something like it on Ubuntu. It shares no code
+with Copywren and is not affiliated with it. Credit for the original idea goes to its author.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
