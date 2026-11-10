@@ -1,0 +1,42 @@
+services:
+  dev:
+    image: clipfinch-dev:local
+    build:
+      context: .
+      target: dev
+      args:
+        APP_UID: ${CLIPFINCH_UID:-1000}
+        APP_GID: ${CLIPFINCH_GID:-1000}
+    init: true
+    volumes:
+      - .:/workspace
+      - cargo-cache:/home/clipfinch/.cargo
+      - target-cache:/workspace/target
+    environment:
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
+  gui-test:
+    extends:
+      service: dev
+    image: clipfinch-gui-test:local
+    build:
+      target: gui-test
+    profiles: [test]
+  desktop:
+    image: clipfinch-desktop:local
+    build:
+      context: .
+      target: runtime
+      args:
+        APP_UID: ${CLIPFINCH_UID:-1000}
+        APP_GID: ${CLIPFINCH_GID:-1000}
+    profiles: [desktop]
+    init: true
+    # Session sockets and synthetic data directories are supplied by container.sh.
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  cargo-cache:
+    name: clipfinch-cargo-${CLIPFINCH_UID:-1000}-${CLIPFINCH_GID:-1000}
+  target-cache:
+    name: clipfinch-target-${CLIPFINCH_UID:-1000}-${CLIPFINCH_GID:-1000}

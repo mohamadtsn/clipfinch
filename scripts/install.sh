@@ -7,7 +7,8 @@ cargo build --release
 
 BIN="$HOME/.local/bin/clipfinch"
 install -Dm755 target/release/clipfinch "$BIN"
-install -Dm644 assets/icon.svg "$HOME/.local/share/icons/hicolor/scalable/apps/clipfinch.svg"
+install -Dm644 assets/icon.png "$HOME/.local/share/icons/hicolor/512x512/apps/clipfinch.png"
+rm -f "$HOME/.local/share/icons/hicolor/scalable/apps/clipfinch.svg"
 mkdir -p "$HOME/.local/share/applications"
 sed "s|^Exec=clipfinch|Exec=$BIN|" assets/clipfinch.desktop \
   > "$HOME/.local/share/applications/clipfinch.desktop"

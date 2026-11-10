@@ -1,0 +1,17 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/*/
+!crates/*/Cargo.toml
+!crates/*/src/
+!crates/*/src/**/
+!crates/*/src/**/*.rs
+!crates/*/src/**/*.css
+!assets/
+!assets/icon.png
+!assets/fonts/
+!assets/fonts/*.ttf
+!assets/fonts/*OFL.txt
+!scripts/
+!scripts/container-entrypoint.sh

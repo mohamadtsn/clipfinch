@@ -1,0 +1,6 @@
+# Explicit opt-in for Ubuntu's AppArmor-mediated desktop session bus.
+services:
+  desktop:
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=unconfined

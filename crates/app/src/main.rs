@@ -28,7 +28,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("queue-paste", "Paste the next item of the Paste Queue"),
     ("settings", "Open the settings window"),
     ("quit", "Quit the running instance"),
-    ("background", "Start in the background without opening anything"),
+    (
+        "background",
+        "Start in the background without opening anything",
+    ),
 ];
 
 const HELP: &str = "\
@@ -172,7 +175,7 @@ fn handle_local_args(args: &[String]) -> Option<glib::ExitCode> {
                 },
             ];
             Some(report(
-                shortcuts::install(&ctx::exe_path(), &list),
+                ctx::exe_path().and_then(|exe| shortcuts::install(&exe, &list)),
                 &format!(
                     "Shortcuts installed: {} (history), {} (queue), {} (queue paste)",
                     s.popup_hotkey, s.queue_hotkey, s.queue_paste_hotkey
@@ -188,8 +191,12 @@ fn handle_local_args(args: &[String]) -> Option<glib::ExitCode> {
                 return Some(glib::ExitCode::FAILURE);
             }
             Some(report(
-                autostart::set(on, &ctx::exe_path()),
-                if on { "Autostart enabled" } else { "Autostart disabled" },
+                ctx::exe_path().and_then(|exe| autostart::set(on, &exe)),
+                if on {
+                    "Autostart enabled"
+                } else {
+                    "Autostart disabled"
+                },
             ))
         }
         "--doctor" => {
@@ -214,11 +221,27 @@ fn report(result: anyhow::Result<()>, ok_message: &str) -> glib::ExitCode {
 }
 
 fn print_doctor() {
+    configure_backend();
+    let backend = if gtk::init().is_ok() {
+        gtk::gdk::Display::default().map(|display| display.type_().name().to_string())
+    } else {
+        None
+    };
     println!("Session type      : {:?}", session::session_type());
+    println!(
+        "GTK display       : {}",
+        backend.as_deref().unwrap_or("unavailable")
+    );
     println!("GNOME             : {}", session::is_gnome());
-    println!("DISPLAY           : {}", std::env::var("DISPLAY").unwrap_or_default());
+    println!(
+        "DISPLAY           : {}",
+        std::env::var("DISPLAY").unwrap_or_default()
+    );
     println!("Auto-paste        : {}", inject::describe());
-    println!("gsettings         : {}", session::command_exists("gsettings"));
+    println!(
+        "gsettings         : {}",
+        session::command_exists("gsettings")
+    );
     println!("ydotool           : {}", session::command_exists("ydotool"));
     println!("Autostart enabled : {}", autostart::is_enabled());
     println!("Data directory    : {}", paths::data_dir().display());

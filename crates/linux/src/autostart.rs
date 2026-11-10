@@ -18,12 +18,21 @@ fn autostart_file() -> PathBuf {
 pub fn set(enabled: bool, exe: &str) -> Result<()> {
     let path = autostart_file();
     if enabled {
+        anyhow::ensure!(!exe.chars().any(char::is_control), "invalid launcher path");
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
+        // Exec quoting is decoded after desktop-entry string escapes.
+        let exe = exe
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('`', "\\`")
+            .replace('$', "\\$")
+            .replace('%', "%%")
+            .replace('\\', "\\\\");
         let contents = format!(
             "[Desktop Entry]\nType=Application\nName=Clipfinch\nComment=Clipboard history\n\
-             Exec={exe} --background\nIcon=clipfinch\nTerminal=false\nNoDisplay=true\n\
+             Exec=/usr/bin/env \"{exe}\" --background\nIcon=clipfinch\nTerminal=false\nNoDisplay=true\n\
              X-GNOME-Autostart-enabled=true\n"
         );
         fs::write(path, contents)?;

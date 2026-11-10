@@ -35,5 +35,5 @@ priority = "optional"
 assets = [
     ["target/release/clipfinch", "usr/bin/", "755"],
     ["../../assets/clipfinch.desktop", "usr/share/applications/", "644"],
-    ["../../assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/clipfinch.svg", "644"],
+    ["../../assets/icon.png", "usr/share/icons/hicolor/512x512/apps/clipfinch.png", "644"],
 ]
