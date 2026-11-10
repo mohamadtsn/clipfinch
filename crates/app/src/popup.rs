@@ -48,6 +48,7 @@ pub struct Popup {
     inner: RefCell<Inner>,
     was_active: Cell<bool>,
     suspend_autohide: Cell<bool>,
+    menu_open: Cell<bool>,
 }
 
 fn add_item(
@@ -229,6 +230,7 @@ impl Popup {
             inner: RefCell::new(Inner::default()),
             was_active: Cell::new(false),
             suspend_autohide: Cell::new(false),
+            menu_open: Cell::new(false),
         });
         popup.wire(&gear);
         let weak = Rc::downgrade(&popup);
@@ -298,7 +300,7 @@ impl Popup {
                     p.was_active.set(true);
                 } else {
                     w.remove_css_class("hold-ctrl");
-                    if p.was_active.get() && !p.suspend_autohide.get() {
+                    if p.was_active.get() && !p.suspend_autohide.get() && !p.menu_open.get() {
                         p.hide();
                     }
                 }
@@ -787,6 +789,10 @@ impl Popup {
     fn on_key(self: &Rc<Self>, keyval: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         use glib::Propagation::{Proceed, Stop};
 
+        if self.menu_open.get() {
+            return Proceed;
+        }
+
         let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
         let previewing = self.inner.borrow().previewing;
@@ -1038,6 +1044,30 @@ impl Popup {
         let weak = Rc::downgrade(self);
         let pop = gtk::Popover::new();
         let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let menu_weak = weak.clone();
+        pop.connect_show(move |_| {
+            if let Some(p) = menu_weak.upgrade() {
+                p.menu_open.set(true);
+            }
+        });
+        let menu_weak = weak.clone();
+        pop.connect_closed(move |_| {
+            if let Some(p) = menu_weak.upgrade() {
+                p.menu_open.set(false);
+                let weak = Rc::downgrade(&p);
+                glib::idle_add_local_once(move || {
+                    if let Some(p) = weak.upgrade() {
+                        if p.was_active.get()
+                            && !p.window.is_active()
+                            && !p.suspend_autohide.get()
+                            && !p.menu_open.get()
+                        {
+                            p.hide();
+                        }
+                    }
+                });
+            }
+        });
 
         let c = clip.clone();
         add_item(&col, &pop, &weak, "Paste", move |p| {
@@ -1091,7 +1121,6 @@ impl Popup {
             text::truncate(label, 48)
         ))]);
         mb.add_css_class("more");
-        mb.set_focus_on_click(false);
         mb.set_popover(Some(&pop));
         mb
     }
@@ -1144,6 +1173,103 @@ mod tests {
             .unwrap();
         popup.refresh();
         assert_eq!(popup.inner.borrow().rows.len(), 1);
+        popup.window.present();
+        let context = glib::MainContext::default();
+        for _ in 0..50 {
+            while context.pending() {
+                context.iteration(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let row = popup.list.row_at_index(0).unwrap();
+        let button = row
+            .child()
+            .unwrap()
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::MenuButton>()
+            .unwrap();
+        let bounds = button.compute_bounds(&popup.window).unwrap();
+        let surface = popup
+            .window
+            .surface()
+            .unwrap()
+            .downcast::<gdk4_x11::X11Surface>()
+            .unwrap();
+        #[link(name = "X11")]
+        unsafe extern "C" {
+            fn XOpenDisplay(name: *const i8) -> *mut std::ffi::c_void;
+            fn XDefaultRootWindow(display: *mut std::ffi::c_void) -> u64;
+            fn XTranslateCoordinates(
+                display: *mut std::ffi::c_void,
+                src: u64,
+                dest: u64,
+                x: i32,
+                y: i32,
+                dx: *mut i32,
+                dy: *mut i32,
+                child: *mut u64,
+            ) -> i32;
+            fn XFlush(display: *mut std::ffi::c_void) -> i32;
+            fn XCloseDisplay(display: *mut std::ffi::c_void) -> i32;
+        }
+        #[link(name = "Xtst")]
+        unsafe extern "C" {
+            fn XTestFakeMotionEvent(
+                display: *mut std::ffi::c_void,
+                screen: i32,
+                x: i32,
+                y: i32,
+                delay: u64,
+            ) -> i32;
+            fn XTestFakeButtonEvent(
+                display: *mut std::ffi::c_void,
+                button: u32,
+                pressed: i32,
+                delay: u64,
+            ) -> i32;
+        }
+        unsafe {
+            let display = XOpenDisplay(std::ptr::null());
+            assert!(!display.is_null());
+            let (mut x, mut y, mut child) = (0, 0, 0);
+            XTranslateCoordinates(
+                display,
+                surface.xid(),
+                XDefaultRootWindow(display),
+                0,
+                0,
+                &mut x,
+                &mut y,
+                &mut child,
+            );
+            XTestFakeMotionEvent(
+                display,
+                -1,
+                x + (bounds.x() + bounds.width() / 2.0) as i32,
+                y + (bounds.y() + bounds.height() / 2.0) as i32,
+                0,
+            );
+            XTestFakeButtonEvent(display, 1, 1, 0);
+            XTestFakeButtonEvent(display, 1, 0, 0);
+            XFlush(display);
+            XCloseDisplay(display);
+        }
+        for _ in 0..50 {
+            while context.pending() {
+                context.iteration(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            button.popover().unwrap().is_visible(),
+            "clicking actions should open the menu"
+        );
+        assert_eq!(
+            popup.on_key(gdk::Key::Return, gdk::ModifierType::empty()),
+            glib::Propagation::Proceed
+        );
+        button.popdown();
         popup.search.set_text("missing-synthetic-query");
         popup.refresh_list();
         assert!(popup.empty.text().contains("No matching clips"));
@@ -1192,6 +1318,25 @@ mod tests {
         assert!(popup.inner.borrow().previewing);
         popup.on_key(gdk::Key::Escape, gdk::ModifierType::empty());
         assert!(!popup.inner.borrow().previewing);
+        let first_row = popup.list.row_at_index(0).unwrap();
+        let actions = first_row
+            .child()
+            .unwrap()
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::MenuButton>()
+            .unwrap();
+        actions.popup();
+        let menu = actions.popover().unwrap();
+        let delete = menu
+            .child()
+            .unwrap()
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        delete.emit_clicked();
+        assert_eq!(popup.inner.borrow().rows.len(), 1);
         match old_data {
             Some(value) => std::env::set_var("CLIPFINCH_DATA_DIR", value),
             None => std::env::remove_var("CLIPFINCH_DATA_DIR"),
