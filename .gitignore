@@ -1,2 +1,8 @@
 /target
 /dist
+/.container
+/docs/
+/.superpowers/
+/scripts/check_ui_environment.py
+/scripts/seed_ui_demo.py
+/scripts/test_ui_seed.py
