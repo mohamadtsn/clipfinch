@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "clipfinch"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "clipfinch-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "image",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "clipfinch-linux"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "x11rb",
