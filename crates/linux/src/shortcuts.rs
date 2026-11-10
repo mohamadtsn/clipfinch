@@ -22,7 +22,11 @@ pub struct Shortcut {
 }
 
 pub fn all_slugs() -> [&'static str; 3] {
-    ["clipfinch-popup", "clipfinch-queue", "clipfinch-queue-paste"]
+    [
+        "clipfinch-popup",
+        "clipfinch-queue",
+        "clipfinch-queue-paste",
+    ]
 }
 
 fn path_for(slug: &str) -> String {
@@ -34,7 +38,7 @@ fn gsettings(args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .context("could not run `gsettings` (is this a GNOME session?)")?;
-    if !out.status.success() {
+    if !out.status.success() || (args.first() == Some(&"set") && !out.stderr.is_empty()) {
         bail!(
             "gsettings {} failed: {}",
             args.join(" "),
@@ -69,10 +73,31 @@ fn format_list(items: &[String]) -> String {
 }
 
 fn current_list() -> Result<Vec<String>> {
-    Ok(parse_list(&gsettings(&["get", MEDIA_KEYS, "custom-keybindings"])?))
+    Ok(parse_list(&gsettings(&[
+        "get",
+        MEDIA_KEYS,
+        "custom-keybindings",
+    ])?))
+}
+
+fn string_value(value: &str) -> String {
+    format!(
+        "'{}'",
+        value
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
+    )
 }
 
 pub fn install(exe: &str, shortcuts: &[Shortcut]) -> Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("CLIPFINCH_SHORTCUTS_UNAVAILABLE").is_none(),
+        "host dconf settings are unavailable; shortcut registration is disabled"
+    );
+    anyhow::ensure!(!exe.chars().any(char::is_control), "invalid launcher path");
     let mut list = current_list()?;
     for s in shortcuts {
         let path = path_for(s.slug);
@@ -80,15 +105,20 @@ pub fn install(exe: &str, shortcuts: &[Shortcut]) -> Result<()> {
             list.push(path.clone());
         }
         let schema = format!("{BINDING_SCHEMA}:{path}");
-        gsettings(&["set", &schema, "name", &format!("'{}'", s.name)])?;
-        gsettings(&["set", &schema, "command", &format!("'{} {}'", exe, s.flag)])?;
-        gsettings(&["set", &schema, "binding", &format!("'{}'", s.binding)])?;
+        let command = format!("'{}' {}", exe.replace('\'', "'\\''"), s.flag);
+        gsettings(&["set", &schema, "name", &string_value(s.name)])?;
+        gsettings(&["set", &schema, "command", &string_value(&command)])?;
+        gsettings(&["set", &schema, "binding", &string_value(&s.binding)])?;
     }
     gsettings(&["set", MEDIA_KEYS, "custom-keybindings", &format_list(&list)])?;
     Ok(())
 }
 
 pub fn uninstall() -> Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("CLIPFINCH_SHORTCUTS_UNAVAILABLE").is_none(),
+        "host dconf settings are unavailable; shortcut removal is disabled"
+    );
     let ours: Vec<String> = all_slugs().iter().map(|s| path_for(s)).collect();
     let list: Vec<String> = current_list()?
         .into_iter()

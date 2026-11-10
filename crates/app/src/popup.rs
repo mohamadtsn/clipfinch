@@ -8,16 +8,16 @@ use clipfinch_core::model::{Clip, Kind, Pinboard};
 use clipfinch_core::search;
 use clipfinch_core::store::{now_ms, Scope};
 use clipfinch_core::text;
-use clipfinch_linux::session::{session_type, SessionType};
 use clipfinch_linux::placement;
+use clipfinch_linux::session::{session_type, SessionType};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
 use crate::ctx::Ctx;
 use crate::dialogs;
 
-const WIDTH: i32 = 460;
-const HEIGHT: i32 = 560;
+const WIDTH: i32 = 540;
+const HEIGHT: i32 = 640;
 const HINT_LIST: &str =
     "Enter paste · Shift+Enter plain text · Space preview · Ctrl+1…9 quick paste · Esc close";
 const HINT_PREVIEW: &str = "Space or Esc back · Enter paste";
@@ -36,12 +36,15 @@ pub struct Popup {
     search: gtk::SearchEntry,
     tabs: gtk::Box,
     list: gtk::ListBox,
+    empty: gtk::Label,
+    count: gtk::Label,
     scroller: gtk::ScrolledWindow,
     stack: gtk::Stack,
     preview_scroll: gtk::ScrolledWindow,
     preview_text: gtk::TextView,
     preview_image: gtk::Picture,
     status: gtk::Label,
+    hotkey: gtk::Label,
     inner: RefCell<Inner>,
     was_active: Cell<bool>,
     suspend_autohide: Cell<bool>,
@@ -97,10 +100,32 @@ impl Popup {
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
-        // Header: tabs + settings button (draggable).
         let handle = gtk::WindowHandle::new();
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         header.add_css_class("header");
+        let icon = gtk::Image::from_icon_name("edit-paste-symbolic");
+        icon.set_pixel_size(20);
+        icon.add_css_class("header-icon");
+        header.append(&icon);
+        let identity = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        identity.set_hexpand(true);
+        let brand = gtk::Label::new(Some("Clipfinch"));
+        brand.add_css_class("brand");
+        brand.set_xalign(0.0);
+        let subtitle = gtk::Label::new(Some("Clipboard history"));
+        subtitle.add_css_class("subtitle");
+        subtitle.set_xalign(0.0);
+        identity.append(&brand);
+        identity.append(&subtitle);
+        header.append(&identity);
+        let accelerator = ctx.state.borrow().settings.popup_hotkey.clone();
+        let hotkey = gtk::Label::new(Some(
+            &gtk::accelerator_parse(&accelerator)
+                .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+                .unwrap_or_else(|| accelerator.clone()),
+        ));
+        hotkey.add_css_class("hotkey");
+        header.append(&hotkey);
         let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let tabs_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Automatic)
@@ -109,16 +134,30 @@ impl Popup {
             .child(&tabs)
             .build();
         let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
+        gear.set_tooltip_text(Some("Settings (Ctrl+,)"));
+        gear.update_property(&[gtk::accessible::Property::Label("Settings")]);
         gear.add_css_class("flat");
         gear.set_focus_on_click(false);
-        header.append(&tabs_scroll);
         header.append(&gear);
+        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.set_tooltip_text(Some("Close (Esc)"));
+        close.update_property(&[gtk::accessible::Property::Label("Close history")]);
+        close.set_focus_on_click(false);
+        header.append(&close);
         handle.set_child(Some(&header));
         root.append(&handle);
 
         let search = gtk::SearchEntry::new();
-        search.set_placeholder_text(Some("Search · try: mail link slides"));
+        search.update_property(&[gtk::accessible::Property::Label("Search clipboard history")]);
+        search.set_placeholder_text(Some("Search text, links and files…"));
         root.append(&search);
+        let collections = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        collections.add_css_class("collections");
+        collections.append(&tabs_scroll);
+        let count = gtk::Label::new(None);
+        count.add_css_class("item-count");
+        collections.append(&count);
+        root.append(&collections);
 
         // List page.
         let list = gtk::ListBox::new();
@@ -126,7 +165,8 @@ impl Popup {
         list.set_activate_on_single_click(true);
         list.set_focusable(false);
         list.add_css_class("cards");
-        let empty = gtk::Label::new(Some("Nothing here yet"));
+        let empty = gtk::Label::new(None);
+        empty.set_wrap(true);
         empty.add_css_class("placeholder");
         list.set_placeholder(Some(&empty));
         let scroller = gtk::ScrolledWindow::builder()
@@ -164,6 +204,9 @@ impl Popup {
         let status = gtk::Label::new(Some(HINT_LIST));
         status.add_css_class("hint");
         status.set_xalign(0.0);
+        status.set_wrap(true);
+        status.set_wrap_mode(pango::WrapMode::WordChar);
+        status.set_max_width_chars(48);
         root.append(&status);
 
         window.set_child(Some(&root));
@@ -174,17 +217,26 @@ impl Popup {
             search,
             tabs,
             list,
+            empty,
+            count,
             scroller,
             stack,
             preview_scroll,
             preview_text,
             preview_image,
             status,
+            hotkey,
             inner: RefCell::new(Inner::default()),
             was_active: Cell::new(false),
             suspend_autohide: Cell::new(false),
         });
         popup.wire(&gear);
+        let weak = Rc::downgrade(&popup);
+        close.connect_clicked(move |_| {
+            if let Some(popup) = weak.upgrade() {
+                popup.hide();
+            }
+        });
         popup
     }
 
@@ -285,19 +337,39 @@ impl Popup {
     /// Opens near the mouse pointer on X11 sessions. Wayland does not let apps
     /// position windows, so there the compositor decides.
     fn place(&self) {
-        if session_type() != SessionType::X11 {
-            return;
-        }
-        let Some((px, py)) = placement::pointer_position() else {
+        let scale = self.window.scale_factor().max(1);
+        let pointer = (session_type() == SessionType::X11)
+            .then(placement::pointer_position)
+            .flatten();
+        let display = gtk::prelude::WidgetExt::display(&self.window);
+        let monitors = display.monitors();
+        let monitor = (0..monitors.n_items())
+            .filter_map(|i| monitors.item(i)?.downcast::<gdk::Monitor>().ok())
+            .find(|monitor| {
+                pointer
+                    .map(|(x, y)| monitor.geometry().contains_point(x / scale, y / scale))
+                    .unwrap_or(true)
+            });
+        let Some(monitor) = monitor else {
             return;
         };
-        let (sw, sh) = placement::screen_size().unwrap_or((1920, 1080));
-        let x = (px + 8).min(sw - WIDTH).max(0);
-        let y = (py + 16).min(sh - HEIGHT).max(0);
+        let geometry = monitor.geometry();
+        let width = WIDTH.min((geometry.width() - 32).max(1));
+        let height = HEIGHT.min((geometry.height() - 48).max(1));
+        self.window.set_default_size(width, height);
+        let Some((px, py)) = pointer else {
+            return;
+        };
+        let x = (px / scale + 8)
+            .min(geometry.x() + geometry.width() - width - 16)
+            .max(geometry.x() + 16);
+        let y = (py / scale + 16)
+            .min(geometry.y() + geometry.height() - height - 24)
+            .max(geometry.y() + 24);
         gtk::prelude::WidgetExt::realize(&self.window);
         if let Some(surface) = self.window.surface() {
             if let Ok(x11) = surface.downcast::<gdk4_x11::X11Surface>() {
-                let _ = placement::move_window(x11.xid() as u32, x, y);
+                let _ = placement::move_window(x11.xid() as u32, x * scale, y * scale);
             }
         }
     }
@@ -305,6 +377,12 @@ impl Popup {
     // ---- data ----------------------------------------------------------------
 
     pub fn refresh(self: &Rc<Self>) {
+        let accelerator = self.ctx.state.borrow().settings.popup_hotkey.clone();
+        self.hotkey.set_text(
+            &gtk::accelerator_parse(&accelerator)
+                .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+                .unwrap_or(accelerator),
+        );
         self.reload_pinboards();
         self.rebuild_tabs();
         self.refresh_list();
@@ -348,11 +426,20 @@ impl Popup {
         let query = search::parse(&self.search.text());
         let rows: Vec<Clip> = clips
             .into_iter()
-            .filter(|c| {
-                query.matches(c.kind, &c.text, c.source_app.as_deref(), c.title.as_deref())
-            })
+            .filter(|c| query.matches(c.kind, &c.text, c.source_app.as_deref(), c.title.as_deref()))
             .take(200)
             .collect();
+
+        self.count.set_text(&format!(
+            "{} {}",
+            rows.len(),
+            if rows.len() == 1 { "item" } else { "items" }
+        ));
+        self.empty.set_text(if self.search.text().is_empty() {
+            "No clips here yet.\nCopy something, or pin a clip to this board."
+        } else {
+            "No matching clips.\nTry another search or clear the search field."
+        });
 
         self.list.remove_all();
         for (idx, clip) in rows.iter().enumerate() {
@@ -432,7 +519,13 @@ impl Popup {
         self.tabs.append(&plus);
     }
 
-    fn add_tab(self: &Rc<Self>, label: &str, index: usize, active: bool, pinboard: Option<Pinboard>) {
+    fn add_tab(
+        self: &Rc<Self>,
+        label: &str,
+        index: usize,
+        active: bool,
+        pinboard: Option<Pinboard>,
+    ) {
         let btn = gtk::Button::with_label(label);
         btn.add_css_class("tab");
         btn.set_focus_on_click(false);
@@ -490,7 +583,9 @@ impl Popup {
             let pop = gtk::Popover::new();
             let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
             let rename_pb = pb.clone();
-            add_item(&col, &pop, &weak, "Rename…", move |p| p.rename_pinboard(&rename_pb));
+            add_item(&col, &pop, &weak, "Rename…", move |p| {
+                p.rename_pinboard(&rename_pb)
+            });
             let delete_pb = pb.clone();
             add_item(&col, &pop, &weak, "Delete pinboard", move |p| {
                 p.delete_pinboard(&delete_pb)
@@ -834,88 +929,88 @@ impl Popup {
 
     // ---- cards ---------------------------------------------------------------
 
-    fn build_card(self: &Rc<Self>, idx: usize, clip: &Clip, pinboards: &[Pinboard]) -> gtk::ListBoxRow {
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    fn build_card(
+        self: &Rc<Self>,
+        idx: usize,
+        clip: &Clip,
+        pinboards: &[Pinboard],
+    ) -> gtk::ListBoxRow {
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         card.add_css_class("card");
-
-        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let kind = gtk::Label::new(Some(clip.kind.label()));
-        kind.add_css_class("kind");
-        head.append(&kind);
-        if let Some(app) = &clip.source_app {
-            let l = gtk::Label::new(Some(app));
-            l.add_css_class("app");
-            l.set_ellipsize(pango::EllipsizeMode::End);
-            head.append(&l);
+        let icon = gtk::Image::from_icon_name(match clip.kind {
+            Kind::Text => "text-x-generic-symbolic",
+            Kind::Link => "insert-link-symbolic",
+            Kind::Image => "image-x-generic-symbolic",
+            Kind::File => "folder-symbolic",
+            Kind::Color => "applications-graphics-symbolic",
+        });
+        icon.set_pixel_size(20);
+        icon.set_valign(gtk::Align::Start);
+        icon.add_css_class("kind-icon");
+        if clip.kind == Kind::Image {
+            if let Some(texture) = clip
+                .thumb
+                .as_ref()
+                .and_then(|bytes| gdk::Texture::from_bytes(&glib::Bytes::from(&bytes[..])).ok())
+            {
+                icon.set_paintable(Some(&texture));
+                icon.set_pixel_size(28);
+            }
+        } else if clip.kind == Kind::Color {
+            if let Some((r, g, b, a)) = text::parse_color(&clip.text) {
+                let bytes = glib::Bytes::from(&[r, g, b, a][..]);
+                let texture = gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::R8g8b8a8, &bytes, 4);
+                icon.set_paintable(Some(&texture));
+                icon.set_pixel_size(24);
+                icon.add_css_class("swatch");
+            }
         }
-        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        head.append(&spacer);
-        let time = gtk::Label::new(Some(&text::relative_time(now_ms(), clip.updated_at)));
-        time.add_css_class("time");
-        head.append(&time);
+        card.append(&icon);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        content.set_hexpand(true);
+        if let Some(title) = &clip.title {
+            let label = body_label(title, 1);
+            label.add_css_class("title");
+            content.append(&label);
+        }
+        if clip.kind == Kind::File {
+            let total = clip.text.lines().count();
+            let mut names: Vec<String> = clip
+                .text
+                .lines()
+                .take(4)
+                .map(|path| text::file_name(path).to_string())
+                .collect();
+            if total > 4 {
+                names.push(format!("… and {} more", total - 4));
+            }
+            content.append(&body_label(&names.join(" · "), 2));
+        } else {
+            content.append(&body_label(
+                &clip.text,
+                if clip.kind == Kind::Text { 2 } else { 1 },
+            ));
+        }
+        let mut metadata = vec![clip.kind.label().to_string()];
+        if let Some(app) = &clip.source_app {
+            metadata.push(app.clone());
+        }
+        metadata.push(text::relative_time(now_ms(), clip.updated_at));
+        let meta = gtk::Label::new(Some(&metadata.join(" · ")));
+        meta.set_xalign(0.0);
+        meta.set_ellipsize(pango::EllipsizeMode::End);
+        meta.add_css_class("metadata");
+        content.append(&meta);
+        card.append(&content);
         if idx < 9 {
             let badge = gtk::Label::new(Some(&format!("Ctrl+{}", idx + 1)));
             badge.add_css_class("badge");
-            head.append(&badge);
+            card.append(&badge);
         }
         let more = self.build_more_menu(clip, pinboards);
-        head.append(&more);
-        card.append(&head);
-
-        if let Some(t) = &clip.title {
-            let l = gtk::Label::new(Some(t));
-            l.add_css_class("title");
-            l.set_xalign(0.0);
-            l.set_ellipsize(pango::EllipsizeMode::End);
-            card.append(&l);
-        }
-
-        match clip.kind {
-            Kind::Text | Kind::Link => card.append(&body_label(&clip.text, 3)),
-            Kind::Image => {
-                let tex = clip
-                    .thumb
-                    .as_ref()
-                    .and_then(|b| gdk::Texture::from_bytes(&glib::Bytes::from(&b[..])).ok());
-                if let Some(tex) = tex {
-                    let pic = gtk::Picture::new();
-                    pic.set_paintable(Some(&tex));
-                    pic.set_halign(gtk::Align::Start);
-                    pic.set_content_fit(gtk::ContentFit::ScaleDown);
-                    card.append(&pic);
-                }
-                card.append(&body_label(&clip.text, 1));
-            }
-            Kind::File => {
-                let total = clip.text.lines().count();
-                let mut names: Vec<String> = clip
-                    .text
-                    .lines()
-                    .take(4)
-                    .map(|p| text::file_name(p).to_string())
-                    .collect();
-                if total > 4 {
-                    names.push(format!("… and {} more", total - 4));
-                }
-                card.append(&body_label(&names.join("\n"), 5));
-            }
-            Kind::Color => {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-                if let Some((r, g, b, a)) = text::parse_color(&clip.text) {
-                    let bytes = glib::Bytes::from(&[r, g, b, a][..]);
-                    let tex = gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::R8g8b8a8, &bytes, 4);
-                    let swatch = gtk::Picture::new();
-                    swatch.set_paintable(Some(&tex));
-                    swatch.set_content_fit(gtk::ContentFit::Fill);
-                    swatch.set_size_request(36, 36);
-                    swatch.add_css_class("swatch");
-                    row.append(&swatch);
-                }
-                row.append(&body_label(&clip.text, 1));
-                card.append(&row);
-            }
-        }
+        more.set_valign(gtk::Align::Center);
+        card.append(&more);
 
         // Right click opens the same menu as the "⋯" button.
         let right = gtk::GestureClick::new();
@@ -945,7 +1040,9 @@ impl Popup {
         let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
         let c = clip.clone();
-        add_item(&col, &pop, &weak, "Paste", move |p| p.ctx.paste_clip(c.id, false));
+        add_item(&col, &pop, &weak, "Paste", move |p| {
+            p.ctx.paste_clip(c.id, false)
+        });
         if clip.kind != Kind::Image {
             let c = clip.clone();
             add_item(&col, &pop, &weak, "Paste as plain text", move |p| {
@@ -966,9 +1063,13 @@ impl Popup {
             }
             let c = clip.clone();
             let pid = pb.id;
-            add_item(&col, &pop, &weak, &format!("Pin to “{}”", pb.name), move |p| {
-                p.pin_clip(&c, Some(pid))
-            });
+            add_item(
+                &col,
+                &pop,
+                &weak,
+                &format!("Pin to “{}”", pb.name),
+                move |p| p.pin_clip(&c, Some(pid)),
+            );
         }
         if clip.pinboard_id.is_some() {
             let c = clip.clone();
@@ -981,10 +1082,122 @@ impl Popup {
 
         pop.set_child(Some(&col));
         let mb = gtk::MenuButton::new();
-        mb.set_label("⋯");
+        mb.set_icon_name("view-more-symbolic");
+        mb.set_has_frame(false);
+        let label = clip.title.as_deref().unwrap_or(&clip.text);
+        mb.set_tooltip_text(Some("Clip actions"));
+        mb.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Actions for {}",
+            text::truncate(label, 48)
+        ))]);
         mb.add_css_class("more");
         mb.set_focus_on_click(false);
         mb.set_popover(Some(&pop));
         mb
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipfinch_core::model::NewClip;
+
+    #[test]
+    #[ignore = "requires a private display and CLIPFINCH_PRIVATE_TEST=1"]
+    fn search_empty_states_and_preview_preserve_selection() {
+        assert_eq!(std::env::var("CLIPFINCH_PRIVATE_TEST").as_deref(), Ok("1"));
+        gtk::init().unwrap();
+        let dir = std::env::temp_dir().join(format!("clipfinch-popup-test-{}", std::process::id()));
+        let old_data = std::env::var_os("CLIPFINCH_DATA_DIR");
+        std::env::set_var("CLIPFINCH_DATA_DIR", &dir);
+        let app = gtk::Application::builder()
+            .application_id("dev.clipfinch.PopupTest")
+            .build();
+        let ctx = Ctx::new(&app).unwrap();
+        let popup = Popup::new(ctx.clone());
+        popup.refresh();
+        ctx.state.borrow_mut().settings.popup_hotkey = "<Super><Shift>k".into();
+        popup.refresh();
+        assert!(popup.hotkey.text().ends_with('K'));
+        assert!(popup.empty.text().contains("No clips here yet"));
+        assert_eq!(popup.count.text(), "0 items");
+        popup.place();
+        let monitor = gtk::prelude::WidgetExt::display(&popup.window)
+            .monitors()
+            .item(0)
+            .unwrap()
+            .downcast::<gdk::Monitor>()
+            .unwrap();
+        assert!(popup.window.default_height() <= monitor.geometry().height() - 48);
+        ctx.state
+            .borrow_mut()
+            .store
+            .upsert_clip(NewClip {
+                kind: Kind::Text,
+                text: "آزمایش Rust 🙂".into(),
+                source_app: None,
+                formats: vec![],
+                thumb: None,
+                hash: "synthetic-popup-test".into(),
+                size: 24,
+            })
+            .unwrap();
+        popup.refresh();
+        assert_eq!(popup.inner.borrow().rows.len(), 1);
+        popup.search.set_text("missing-synthetic-query");
+        popup.refresh_list();
+        assert!(popup.empty.text().contains("No matching clips"));
+        assert_eq!(popup.count.text(), "0 items");
+        popup.search.set_text("Rust");
+        popup.refresh_list();
+        assert_eq!(popup.count.text(), "1 item");
+        assert_eq!(popup.list.selected_row().unwrap().index(), 0);
+        let selected = popup.inner.borrow().rows[0].clone();
+        popup.open_preview(&selected);
+        assert_eq!(popup.stack.visible_child_name().as_deref(), Some("preview"));
+        popup.close_preview();
+        assert_eq!(popup.stack.visible_child_name().as_deref(), Some("list"));
+        assert_eq!(popup.list.selected_row().unwrap().index(), 0);
+        popup.search.set_text("");
+        popup.refresh_list();
+        let pixels = glib::Bytes::from_owned(vec![128u8; 2048 * 1024 * 4]);
+        let texture =
+            gdk::MemoryTexture::new(2048, 1024, gdk::MemoryFormat::R8g8b8a8, &pixels, 2048 * 4);
+        ctx.state
+            .borrow_mut()
+            .store
+            .upsert_clip(NewClip {
+                kind: Kind::Image,
+                text: "Large synthetic image".into(),
+                source_app: None,
+                formats: vec![],
+                thumb: Some(texture.save_to_png_bytes().to_vec()),
+                hash: "synthetic-large-image".into(),
+                size: 8388608,
+            })
+            .unwrap();
+        popup.refresh();
+        let first_card = popup.list.row_at_index(0).unwrap().child().unwrap();
+        let image = first_card
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Image>()
+            .unwrap();
+        assert!(image.measure(gtk::Orientation::Horizontal, -1).1 <= 28);
+        popup.on_key(gdk::Key::Down, gdk::ModifierType::empty());
+        assert_eq!(popup.selected_index(), Some(1));
+        popup.on_key(gdk::Key::Up, gdk::ModifierType::empty());
+        assert_eq!(popup.selected_index(), Some(0));
+        popup.on_key(gdk::Key::space, gdk::ModifierType::empty());
+        assert!(popup.inner.borrow().previewing);
+        popup.on_key(gdk::Key::Escape, gdk::ModifierType::empty());
+        assert!(!popup.inner.borrow().previewing);
+        match old_data {
+            Some(value) => std::env::set_var("CLIPFINCH_DATA_DIR", value),
+            None => std::env::remove_var("CLIPFINCH_DATA_DIR"),
+        }
+        drop(popup);
+        drop(ctx);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

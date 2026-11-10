@@ -1,0 +1,103 @@
+name: Build release packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Debian package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libdbus-1-dev \
+            libx11-dev libxtst-dev libxkbcommon-dev
+
+      - name: Test and build
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          cargo test --locked --workspace
+          cargo build --locked --release -p clipfinch
+
+      - name: Build and inspect Debian package
+        run: |
+          cargo install cargo-deb --version 3.6.0 --locked
+          cargo deb -p clipfinch --no-build
+          package=$(find target/debian -maxdepth 1 -name '*.deb' -print -quit)
+          test -n "$package"
+          test "$(dpkg-deb -f "$package" Architecture)" = "${{ matrix.arch }}"
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package"
+
+      - name: Upload package to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p dist/portable
+          cp target/release/clipfinch LICENSE dist/portable/
+          tar -C dist/portable -czf "dist/clipfinch-linux-${{ matrix.arch }}.tar.gz" clipfinch LICENSE
+          gh release upload "$RELEASE_TAG" target/debian/*.deb dist/*.tar.gz
+
+  rpm:
+    name: Fedora RPM (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build and inspect RPM in Fedora
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace \
+            -e EXPECTED_ARCH -e CARGO_BUILD_JOBS=2 fedora:43 bash -euxo pipefail -c '
+              dnf install -y --setopt=install_weak_deps=False cargo rustc gcc gcc-c++ pkgconf-pkg-config gtk4-devel \
+                dbus-devel libX11-devel libXtst-devel libxkbcommon-devel rpm-build python3
+              cargo test --locked --workspace
+              cargo build --locked --release -p clipfinch
+              version=$(python3 -c '\''import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])'\'')
+              rpmbuild -bb packaging/clipfinch.spec --define "_topdir /tmp/rpmbuild" \
+                --define "projectdir /workspace" --define "clipfinch_version $version"
+              mkdir -p dist/rpm
+              cp /tmp/rpmbuild/RPMS/"$EXPECTED_ARCH"/*.rpm dist/rpm/
+              package=$(find dist/rpm -maxdepth 1 -name "*.rpm" -print -quit)
+              test -n "$package"
+              test "$(rpm -qp --qf "%{ARCH}" "$package")" = "$EXPECTED_ARCH"
+              rpm -qip "$package"
+              rpm -qlp "$package"
+            '
+
+      - name: Upload package to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/rpm/*.rpm

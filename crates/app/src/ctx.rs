@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
+
 use clipfinch_core::model::Kind;
 use clipfinch_core::paths;
 use clipfinch_core::queue::PasteQueue;
@@ -46,11 +48,26 @@ pub struct Ctx {
     paused_flag: Arc<AtomicBool>,
 }
 
-/// Absolute path of the running binary (used for shortcuts and autostart).
-pub fn exe_path() -> String {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "clipfinch".to_string())
+/// Containers register the host launcher rather than their internal binary.
+pub fn exe_path() -> anyhow::Result<String> {
+    resolve_exe_path(std::env::var_os("CLIPFINCH_LAUNCHER").as_deref())
+}
+
+fn resolve_exe_path(launcher: Option<&std::ffi::OsStr>) -> anyhow::Result<String> {
+    let path = match launcher {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_exe().context("could not locate the running executable")?,
+    };
+    anyhow::ensure!(
+        path.is_absolute(),
+        "CLIPFINCH_LAUNCHER must be an absolute path"
+    );
+    let path = path.to_str().context("launcher path must be valid UTF-8")?;
+    anyhow::ensure!(
+        !path.chars().any(char::is_control),
+        "launcher path must not contain control characters"
+    );
+    Ok(path.to_string())
 }
 
 #[allow(deprecated)]
@@ -58,16 +75,58 @@ pub fn load_css() {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
     };
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    if let Some(schema) = gio::SettingsSchemaSource::default()
+        .and_then(|source| source.lookup("org.gnome.desktop.interface", true))
+    {
+        if schema.has_key("color-scheme") {
+            let system = gio::Settings::new("org.gnome.desktop.interface");
+            system
+                .bind(
+                    "color-scheme",
+                    &settings,
+                    "gtk-application-prefer-dark-theme",
+                )
+                .get_only()
+                .no_sensitivity()
+                .mapping(|value, _| {
+                    value
+                        .str()
+                        .map(|scheme| (scheme == "prefer-dark").to_value())
+                })
+                .build();
+        }
+    }
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
+    apply_css(
+        &provider,
+        settings.property("gtk-application-prefer-dark-theme"),
+    );
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    if let Some(settings) = gtk::Settings::default() {
-        settings.set_gtk_application_prefer_dark_theme(true);
-    }
+    settings.connect_notify_local(
+        Some("gtk-application-prefer-dark-theme"),
+        move |settings, _| {
+            apply_css(
+                &provider,
+                settings.property("gtk-application-prefer-dark-theme"),
+            );
+        },
+    );
+}
+
+fn apply_css(provider: &gtk::CssProvider, dark: bool) {
+    let colors = if dark {
+        include_str!("palette-dark.css")
+    } else {
+        include_str!("palette-light.css")
+    };
+    provider.load_from_string(&format!("{colors}\n{}", include_str!("style.css")));
 }
 
 impl Ctx {
@@ -233,7 +292,8 @@ impl Ctx {
     pub fn update_settings(&self, f: impl FnOnce(&mut Settings)) {
         let mut st = self.state.borrow_mut();
         f(&mut st.settings);
-        self.paused_flag.store(st.settings.paused, Ordering::Relaxed);
+        self.paused_flag
+            .store(st.settings.paused, Ordering::Relaxed);
         if let Err(e) = st.settings.save(&paths::settings_path()) {
             eprintln!("clipfinch: could not save settings: {e:#}");
         }
@@ -356,6 +416,62 @@ impl Ctx {
                 "Paste queue is empty",
                 "Start the queue, then copy several things.",
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    #[ignore = "requires an isolated display and GSETTINGS_BACKEND=memory"]
+    fn system_theme_changes_update_the_running_application() {
+        assert_eq!(std::env::var("GSETTINGS_BACKEND").as_deref(), Ok("memory"));
+        gtk::init().unwrap();
+        let provider = gtk::CssProvider::new();
+        let errors = Rc::new(RefCell::new(Vec::new()));
+        let collected = errors.clone();
+        provider.connect_parsing_error(move |_, _, error| {
+            collected.borrow_mut().push(error.to_string())
+        });
+        apply_css(&provider, false);
+        apply_css(&provider, true);
+        assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+        let system = gio::Settings::new("org.gnome.desktop.interface");
+        system.set_string("color-scheme", "default").unwrap();
+        load_css();
+        let settings = gtk::Settings::default().unwrap();
+        assert!(!settings.property::<bool>("gtk-application-prefer-dark-theme"));
+        system.set_string("color-scheme", "prefer-dark").unwrap();
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(settings.property::<bool>("gtk-application-prefer-dark-theme"));
+        system.set_string("color-scheme", "prefer-light").unwrap();
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+        assert!(!settings.property::<bool>("gtk-application-prefer-dark-theme"));
+    }
+
+    #[test]
+    fn launcher_override_preserves_absolute_paths_with_spaces() {
+        assert_eq!(
+            resolve_exe_path(Some(OsStr::new("/home/demo/clip finch/container.sh"))).unwrap(),
+            "/home/demo/clip finch/container.sh"
+        );
+        assert!(std::path::Path::new(&resolve_exe_path(None).unwrap()).is_absolute());
+    }
+
+    #[test]
+    fn launcher_override_rejects_relative_empty_and_control_characters() {
+        for path in ["", "scripts/container.sh", "/tmp/launcher\nInjected=true"] {
+            assert!(
+                resolve_exe_path(Some(OsStr::new(path))).is_err(),
+                "{path:?}"
+            );
         }
     }
 }
